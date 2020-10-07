@@ -153,16 +153,19 @@ light:
   payload_off: "off"
 
 """
-from unittest import mock
-from unittest.mock import patch
+import json
+from os import path
 
-from homeassistant.components import light, mqtt
-from homeassistant.components.mqtt.discovery import async_start
-from homeassistant.const import ATTR_ASSUMED_STATE, STATE_OFF, STATE_ON
+import pytest
+
+from homeassistant import config as hass_config
+from homeassistant.components import light
+from homeassistant.const import ATTR_ASSUMED_STATE, SERVICE_RELOAD, STATE_OFF, STATE_ON
 import homeassistant.core as ha
 from homeassistant.setup import async_setup_component
 
-from .common import (
+from .test_common import (
+    help_test_availability_when_connection_lost,
     help_test_availability_without_topic,
     help_test_custom_availability_payload,
     help_test_default_availability_payload,
@@ -170,11 +173,14 @@ from .common import (
     help_test_discovery_removal,
     help_test_discovery_update,
     help_test_discovery_update_attr,
+    help_test_discovery_update_unchanged,
+    help_test_entity_debug_info_message,
     help_test_entity_device_info_remove,
     help_test_entity_device_info_update,
     help_test_entity_device_info_with_connection,
     help_test_entity_device_info_with_identifier,
-    help_test_entity_id_update,
+    help_test_entity_id_update_discovery_update,
+    help_test_entity_id_update_subscriptions,
     help_test_setting_attribute_via_mqtt_json_message,
     help_test_setting_attribute_with_template,
     help_test_unique_id,
@@ -182,12 +188,8 @@ from .common import (
     help_test_update_with_json_attrs_not_dict,
 )
 
-from tests.common import (
-    MockConfigEntry,
-    assert_setup_component,
-    async_fire_mqtt_message,
-    mock_coro,
-)
+from tests.async_mock import call, patch
+from tests.common import assert_setup_component, async_fire_mqtt_message
 from tests.components.light import common
 
 DEFAULT_CONFIG = {
@@ -200,6 +202,7 @@ async def test_fail_setup_if_no_command_topic(hass, mqtt_mock):
     assert await async_setup_component(
         hass, light.DOMAIN, {light.DOMAIN: {"platform": "mqtt", "name": "test"}}
     )
+    await hass.async_block_till_done()
     assert hass.states.get("light.test") is None
 
 
@@ -217,6 +220,7 @@ async def test_no_color_brightness_color_temp_hs_white_xy_if_no_topics(hass, mqt
             }
         },
     )
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -268,6 +272,7 @@ async def test_controlling_state_via_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -364,6 +369,7 @@ async def test_invalid_state_via_topic(hass, mqtt_mock, caplog):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -455,6 +461,7 @@ async def test_brightness_controlling_scale(hass, mqtt_mock):
                 }
             },
         )
+        await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -500,6 +507,7 @@ async def test_brightness_from_rgb_controlling_scale(hass, mqtt_mock):
                 }
             },
         )
+        await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -539,6 +547,7 @@ async def test_white_value_controlling_scale(hass, mqtt_mock):
                 }
             },
         )
+        await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -598,6 +607,7 @@ async def test_controlling_state_via_topic_with_templates(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -638,6 +648,35 @@ async def test_controlling_state_via_topic_with_templates(hass, mqtt_mock):
     assert state.attributes.get("xy_color") == (0.14, 0.131)
 
 
+async def test_controlling_state_via_topic_with_value_template(hass, mqtt_mock):
+    """Test the setting of the state with undocumented value_template."""
+    config = {
+        light.DOMAIN: {
+            "platform": "mqtt",
+            "name": "test",
+            "state_topic": "test_light_rgb/status",
+            "command_topic": "test_light_rgb/set",
+            "value_template": "{{ value_json.hello }}",
+        }
+    }
+
+    assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("light.test")
+    assert state.state == STATE_OFF
+
+    async_fire_mqtt_message(hass, "test_light_rgb/status", '{"hello": "ON"}')
+
+    state = hass.states.get("light.test")
+    assert state.state == STATE_ON
+
+    async_fire_mqtt_message(hass, "test_light_rgb/status", '{"hello": "OFF"}')
+
+    state = hass.states.get("light.test")
+    assert state.state == STATE_OFF
+
+
 async def test_sending_mqtt_commands_and_optimistic(hass, mqtt_mock):
     """Test the sending of command in optimistic mode."""
     config = {
@@ -671,10 +710,11 @@ async def test_sending_mqtt_commands_and_optimistic(hass, mqtt_mock):
     )
     with patch(
         "homeassistant.helpers.restore_state.RestoreEntity.async_get_last_state",
-        return_value=mock_coro(fake_state),
+        return_value=fake_state,
     ):
         with assert_setup_component(1, light.DOMAIN):
             assert await async_setup_component(hass, light.DOMAIN, config)
+            await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_ON
@@ -708,18 +748,18 @@ async def test_sending_mqtt_commands_and_optimistic(hass, mqtt_mock):
         hass, "light.test", brightness=50, xy_color=[0.123, 0.123]
     )
     await common.async_turn_on(hass, "light.test", brightness=50, hs_color=[359, 78])
-    await common.async_turn_on(
-        hass, "light.test", rgb_color=[255, 128, 0], white_value=80
-    )
+    await common.async_turn_on(hass, "light.test", rgb_color=[255, 128, 0])
+    await common.async_turn_on(hass, "light.test", white_value=80, color_temp=125)
 
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light_rgb/set", "on", 2, False),
-            mock.call("test_light_rgb/rgb/set", "255,128,0", 2, False),
-            mock.call("test_light_rgb/brightness/set", 50, 2, False),
-            mock.call("test_light_rgb/hs/set", "359.0,78.0", 2, False),
-            mock.call("test_light_rgb/white_value/set", 80, 2, False),
-            mock.call("test_light_rgb/xy/set", "0.14,0.131", 2, False),
+            call("test_light_rgb/set", "on", 2, False),
+            call("test_light_rgb/rgb/set", "255,128,0", 2, False),
+            call("test_light_rgb/brightness/set", 50, 2, False),
+            call("test_light_rgb/hs/set", "359.0,78.0", 2, False),
+            call("test_light_rgb/white_value/set", 80, 2, False),
+            call("test_light_rgb/xy/set", "0.14,0.131", 2, False),
+            call("test_light_rgb/color_temp/set", 125, 2, False),
         ],
         any_order=True,
     )
@@ -750,6 +790,7 @@ async def test_sending_mqtt_rgb_command_with_template(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -758,8 +799,8 @@ async def test_sending_mqtt_rgb_command_with_template(hass, mqtt_mock):
 
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light_rgb/set", "on", 0, False),
-            mock.call("test_light_rgb/rgb/set", "#ff803f", 0, False),
+            call("test_light_rgb/set", "on", 0, False),
+            call("test_light_rgb/rgb/set", "#ff803f", 0, False),
         ],
         any_order=True,
     )
@@ -785,6 +826,7 @@ async def test_sending_mqtt_color_temp_command_with_template(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -793,8 +835,8 @@ async def test_sending_mqtt_color_temp_command_with_template(hass, mqtt_mock):
 
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light_color_temp/set", "on", 0, False),
-            mock.call("test_light_color_temp/color_temp/set", "10", 0, False),
+            call("test_light_color_temp/set", "on", 0, False),
+            call("test_light_color_temp/color_temp/set", 10, 0, False),
         ],
         any_order=True,
     )
@@ -817,6 +859,7 @@ async def test_show_brightness_if_only_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -842,6 +885,7 @@ async def test_show_color_temp_only_if_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -867,6 +911,7 @@ async def test_show_effect_only_if_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -892,6 +937,7 @@ async def test_show_hs_if_only_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -917,6 +963,7 @@ async def test_show_white_value_if_only_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -942,6 +989,7 @@ async def test_show_xy_if_only_command_topic(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -967,6 +1015,7 @@ async def test_on_command_first(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -978,10 +1027,9 @@ async def test_on_command_first(hass, mqtt_mock):
     #    test_light/bright: 50
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/set", "ON", 0, False),
-            mock.call("test_light/bright", 50, 0, False),
+            call("test_light/set", "ON", 0, False),
+            call("test_light/bright", 50, 0, False),
         ],
-        any_order=True,
     )
     mqtt_mock.async_publish.reset_mock()
 
@@ -1002,6 +1050,7 @@ async def test_on_command_last(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -1013,10 +1062,9 @@ async def test_on_command_last(hass, mqtt_mock):
     #    test_light/set: 'ON'
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/bright", 50, 0, False),
-            mock.call("test_light/set", "ON", 0, False),
+            call("test_light/bright", 50, 0, False),
+            call("test_light/set", "ON", 0, False),
         ],
-        any_order=True,
     )
     mqtt_mock.async_publish.reset_mock()
 
@@ -1039,6 +1087,7 @@ async def test_on_command_brightness(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -1064,14 +1113,80 @@ async def test_on_command_brightness(hass, mqtt_mock):
 
     await common.async_turn_off(hass, "light.test")
 
-    # Turn on w/ just a color to insure brightness gets
+    # Turn on w/ just a color to ensure brightness gets
     # added and sent.
     await common.async_turn_on(hass, "light.test", rgb_color=[255, 128, 0])
 
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/rgb", "255,128,0", 0, False),
-            mock.call("test_light/bright", 50, 0, False),
+            call("test_light/rgb", "255,128,0", 0, False),
+            call("test_light/bright", 50, 0, False),
+        ],
+        any_order=True,
+    )
+
+
+async def test_on_command_brightness_scaled(hass, mqtt_mock):
+    """Test brightness scale."""
+    config = {
+        light.DOMAIN: {
+            "platform": "mqtt",
+            "name": "test",
+            "command_topic": "test_light/set",
+            "brightness_command_topic": "test_light/bright",
+            "brightness_scale": 100,
+            "rgb_command_topic": "test_light/rgb",
+            "on_command_type": "brightness",
+        }
+    }
+
+    assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("light.test")
+    assert state.state == STATE_OFF
+
+    # Turn on w/ no brightness - should set to max
+    await common.async_turn_on(hass, "light.test")
+
+    # Should get the following MQTT messages.
+    #    test_light/bright: 100
+    mqtt_mock.async_publish.assert_called_once_with("test_light/bright", 100, 0, False)
+    mqtt_mock.async_publish.reset_mock()
+
+    await common.async_turn_off(hass, "light.test")
+
+    mqtt_mock.async_publish.assert_called_once_with("test_light/set", "OFF", 0, False)
+    mqtt_mock.async_publish.reset_mock()
+
+    # Turn on w/ brightness
+    await common.async_turn_on(hass, "light.test", brightness=50)
+
+    mqtt_mock.async_publish.assert_called_once_with("test_light/bright", 20, 0, False)
+    mqtt_mock.async_publish.reset_mock()
+
+    # Turn on w/ max brightness
+    await common.async_turn_on(hass, "light.test", brightness=255)
+
+    mqtt_mock.async_publish.assert_called_once_with("test_light/bright", 100, 0, False)
+    mqtt_mock.async_publish.reset_mock()
+
+    # Turn on w/ min brightness
+    await common.async_turn_on(hass, "light.test", brightness=1)
+
+    mqtt_mock.async_publish.assert_called_once_with("test_light/bright", 1, 0, False)
+    mqtt_mock.async_publish.reset_mock()
+
+    await common.async_turn_off(hass, "light.test")
+
+    # Turn on w/ just a color to ensure brightness gets
+    # added and sent.
+    await common.async_turn_on(hass, "light.test", rgb_color=[255, 128, 0])
+
+    mqtt_mock.async_publish.assert_has_calls(
+        [
+            call("test_light/rgb", "255,128,0", 0, False),
+            call("test_light/bright", 1, 0, False),
         ],
         any_order=True,
     )
@@ -1089,6 +1204,7 @@ async def test_on_command_rgb(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -1100,8 +1216,36 @@ async def test_on_command_rgb(hass, mqtt_mock):
     #    test_light/set: 'ON'
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/rgb", "127,127,127", 0, False),
-            mock.call("test_light/set", "ON", 0, False),
+            call("test_light/rgb", "127,127,127", 0, False),
+            call("test_light/set", "ON", 0, False),
+        ],
+        any_order=True,
+    )
+    mqtt_mock.async_publish.reset_mock()
+
+    await common.async_turn_on(hass, "light.test", brightness=255)
+
+    # Should get the following MQTT messages.
+    #    test_light/rgb: '255,255,255'
+    #    test_light/set: 'ON'
+    mqtt_mock.async_publish.assert_has_calls(
+        [
+            call("test_light/rgb", "255,255,255", 0, False),
+            call("test_light/set", "ON", 0, False),
+        ],
+        any_order=True,
+    )
+    mqtt_mock.async_publish.reset_mock()
+
+    await common.async_turn_on(hass, "light.test", brightness=1)
+
+    # Should get the following MQTT messages.
+    #    test_light/rgb: '1,1,1'
+    #    test_light/set: 'ON'
+    mqtt_mock.async_publish.assert_has_calls(
+        [
+            call("test_light/rgb", "1,1,1", 0, False),
+            call("test_light/set", "ON", 0, False),
         ],
         any_order=True,
     )
@@ -1110,6 +1254,32 @@ async def test_on_command_rgb(hass, mqtt_mock):
     await common.async_turn_off(hass, "light.test")
 
     mqtt_mock.async_publish.assert_called_once_with("test_light/set", "OFF", 0, False)
+
+    # Ensure color gets scaled with brightness.
+    await common.async_turn_on(hass, "light.test", rgb_color=[255, 128, 0])
+
+    mqtt_mock.async_publish.assert_has_calls(
+        [
+            call("test_light/rgb", "1,0,0", 0, False),
+            call("test_light/set", "ON", 0, False),
+        ],
+        any_order=True,
+    )
+    mqtt_mock.async_publish.reset_mock()
+
+    await common.async_turn_on(hass, "light.test", brightness=255)
+
+    # Should get the following MQTT messages.
+    #    test_light/rgb: '255,128,0'
+    #    test_light/set: 'ON'
+    mqtt_mock.async_publish.assert_has_calls(
+        [
+            call("test_light/rgb", "255,128,0", 0, False),
+            call("test_light/set", "ON", 0, False),
+        ],
+        any_order=True,
+    )
+    mqtt_mock.async_publish.reset_mock()
 
 
 async def test_on_command_rgb_template(hass, mqtt_mock):
@@ -1125,6 +1295,7 @@ async def test_on_command_rgb_template(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -1136,8 +1307,8 @@ async def test_on_command_rgb_template(hass, mqtt_mock):
     #    test_light/set: 'ON'
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/rgb", "127/127/127", 0, False),
-            mock.call("test_light/set", "ON", 0, False),
+            call("test_light/rgb", "127/127/127", 0, False),
+            call("test_light/set", "ON", 0, False),
         ],
         any_order=True,
     )
@@ -1161,6 +1332,7 @@ async def test_effect(hass, mqtt_mock):
     }
 
     assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
 
     state = hass.states.get("light.test")
     assert state.state == STATE_OFF
@@ -1172,8 +1344,8 @@ async def test_effect(hass, mqtt_mock):
     #    test_light/set: 'ON'
     mqtt_mock.async_publish.assert_has_calls(
         [
-            mock.call("test_light/effect/set", "rainbow", 0, False),
-            mock.call("test_light/set", "ON", 0, False),
+            call("test_light/effect/set", "rainbow", 0, False),
+            call("test_light/set", "ON", 0, False),
         ],
         any_order=True,
     )
@@ -1182,6 +1354,13 @@ async def test_effect(hass, mqtt_mock):
     await common.async_turn_off(hass, "light.test")
 
     mqtt_mock.async_publish.assert_called_once_with("test_light/set", "OFF", 0, False)
+
+
+async def test_availability_when_connection_lost(hass, mqtt_mock):
+    """Test availability after MQTT disconnection."""
+    await help_test_availability_when_connection_lost(
+        hass, mqtt_mock, light.DOMAIN, DEFAULT_CONFIG
+    )
 
 
 async def test_availability_without_topic(hass, mqtt_mock):
@@ -1240,7 +1419,7 @@ async def test_discovery_update_attr(hass, mqtt_mock, caplog):
     )
 
 
-async def test_unique_id(hass):
+async def test_unique_id(hass, mqtt_mock):
     """Test unique id option only creates one light per unique_id."""
     config = {
         light.DOMAIN: [
@@ -1260,7 +1439,7 @@ async def test_unique_id(hass):
             },
         ]
     }
-    await help_test_unique_id(hass, light.DOMAIN, config)
+    await help_test_unique_id(hass, mqtt_mock, light.DOMAIN, config)
 
 
 async def test_discovery_removal_light(hass, mqtt_mock, caplog):
@@ -1275,8 +1454,6 @@ async def test_discovery_removal_light(hass, mqtt_mock, caplog):
 
 async def test_discovery_deprecated(hass, mqtt_mock, caplog):
     """Test discovery of mqtt light with deprecated platform option."""
-    entry = MockConfigEntry(domain=mqtt.DOMAIN)
-    await async_start(hass, "homeassistant", {"mqtt": {}}, entry)
     data = (
         '{ "name": "Beer",' '  "platform": "mqtt",' '  "command_topic": "test_topic"}'
     )
@@ -1287,23 +1464,490 @@ async def test_discovery_deprecated(hass, mqtt_mock, caplog):
     assert state.name == "Beer"
 
 
-async def test_discovery_update_light(hass, mqtt_mock, caplog):
+async def test_discovery_update_light_topic_and_template(hass, mqtt_mock, caplog):
+    """Test update of discovered light."""
+    data1 = json.dumps(
+        {
+            "name": "Beer",
+            "state_topic": "test_light_rgb/state1",
+            "command_topic": "test_light_rgb/set",
+            "brightness_command_topic": "test_light_rgb/state1",
+            "rgb_command_topic": "test_light_rgb/rgb/set",
+            "color_temp_command_topic": "test_light_rgb/state1",
+            "effect_command_topic": "test_light_rgb/effect/set",
+            "hs_command_topic": "test_light_rgb/hs/set",
+            "white_value_command_topic": "test_light_rgb/white_value/set",
+            "xy_command_topic": "test_light_rgb/xy/set",
+            "brightness_state_topic": "test_light_rgb/state1",
+            "color_temp_state_topic": "test_light_rgb/state1",
+            "effect_state_topic": "test_light_rgb/state1",
+            "hs_state_topic": "test_light_rgb/state1",
+            "rgb_state_topic": "test_light_rgb/state1",
+            "white_value_state_topic": "test_light_rgb/state1",
+            "xy_state_topic": "test_light_rgb/state1",
+            "state_value_template": "{{ value_json.state1.state }}",
+            "brightness_value_template": "{{ value_json.state1.brightness }}",
+            "color_temp_value_template": "{{ value_json.state1.ct }}",
+            "effect_value_template": "{{ value_json.state1.fx }}",
+            "hs_value_template": "{{ value_json.state1.hs }}",
+            "rgb_value_template": "{{ value_json.state1.rgb }}",
+            "white_value_template": "{{ value_json.state1.white }}",
+            "xy_value_template": "{{ value_json.state1.xy }}",
+        }
+    )
+
+    data2 = json.dumps(
+        {
+            "name": "Milk",
+            "state_topic": "test_light_rgb/state2",
+            "command_topic": "test_light_rgb/set",
+            "brightness_command_topic": "test_light_rgb/state2",
+            "rgb_command_topic": "test_light_rgb/rgb/set",
+            "color_temp_command_topic": "test_light_rgb/state2",
+            "effect_command_topic": "test_light_rgb/effect/set",
+            "hs_command_topic": "test_light_rgb/hs/set",
+            "white_value_command_topic": "test_light_rgb/white_value/set",
+            "xy_command_topic": "test_light_rgb/xy/set",
+            "brightness_state_topic": "test_light_rgb/state2",
+            "color_temp_state_topic": "test_light_rgb/state2",
+            "effect_state_topic": "test_light_rgb/state2",
+            "hs_state_topic": "test_light_rgb/state2",
+            "rgb_state_topic": "test_light_rgb/state2",
+            "white_value_state_topic": "test_light_rgb/state2",
+            "xy_state_topic": "test_light_rgb/state2",
+            "state_value_template": "{{ value_json.state2.state }}",
+            "brightness_value_template": "{{ value_json.state2.brightness }}",
+            "color_temp_value_template": "{{ value_json.state2.ct }}",
+            "effect_value_template": "{{ value_json.state2.fx }}",
+            "hs_value_template": "{{ value_json.state2.hs }}",
+            "rgb_value_template": "{{ value_json.state2.rgb }}",
+            "white_value_template": "{{ value_json.state2.white }}",
+            "xy_value_template": "{{ value_json.state2.xy }}",
+        }
+    )
+    state_data1 = [
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                )
+            ],
+            "on",
+            [("brightness", 100), ("color_temp", 123), ("effect", "cycle")],
+        ),
+        (
+            [("test_light_rgb/state1", '{"state1":{"state":"OFF"}}')],
+            "off",
+            None,
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "hs":"1,2"}}',
+                )
+            ],
+            "on",
+            [("hs_color", (1, 2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"rgb":"255,127,63"}}',
+                )
+            ],
+            "on",
+            [("rgb_color", (255, 127, 63))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"white":50, "xy":"0.3, 0.4"}}',
+                )
+            ],
+            "on",
+            [("white_value", 50), ("xy_color", (0.3, 0.401))],
+        ),
+    ]
+    state_data2 = [
+        (
+            [
+                (
+                    "test_light_rgb/state2",
+                    '{"state2":{"state":"ON", "brightness":50, "ct":200, "fx":"loop"}}',
+                )
+            ],
+            "on",
+            [("brightness", 50), ("color_temp", 200), ("effect", "loop")],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                ),
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                ),
+                (
+                    "test_light_rgb/state2",
+                    '{"state1":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                ),
+            ],
+            "on",
+            [("brightness", 50), ("color_temp", 200), ("effect", "loop")],
+        ),
+        (
+            [("test_light_rgb/state1", '{"state1":{"state":"OFF"}}')],
+            "on",
+            None,
+        ),
+        (
+            [("test_light_rgb/state1", '{"state2":{"state":"OFF"}}')],
+            "on",
+            None,
+        ),
+        (
+            [("test_light_rgb/state2", '{"state1":{"state":"OFF"}}')],
+            "on",
+            None,
+        ),
+        (
+            [("test_light_rgb/state2", '{"state2":{"state":"OFF"}}')],
+            "off",
+            None,
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state2",
+                    '{"state2":{"state":"ON", "hs":"1.2,2.2"}}',
+                )
+            ],
+            "on",
+            [("hs_color", (1.2, 2.2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "hs":"1,2"}}',
+                ),
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"state":"ON", "hs":"1,2"}}',
+                ),
+                (
+                    "test_light_rgb/state2",
+                    '{"state1":{"state":"ON", "hs":"1,2"}}',
+                ),
+            ],
+            "on",
+            [("hs_color", (1.2, 2.2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state2",
+                    '{"state2":{"rgb":"63,127,255"}}',
+                )
+            ],
+            "on",
+            [("rgb_color", (63, 127, 255))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"rgb":"255,127,63"}}',
+                ),
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"rgb":"255,127,63"}}',
+                ),
+                (
+                    "test_light_rgb/state2",
+                    '{"state1":{"rgb":"255,127,63"}}',
+                ),
+            ],
+            "on",
+            [("rgb_color", (63, 127, 255))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state2",
+                    '{"state2":{"white":75, "xy":"0.4, 0.3"}}',
+                )
+            ],
+            "on",
+            [("white_value", 75), ("xy_color", (0.4, 0.3))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"white":50, "xy":"0.3, 0.4"}}',
+                ),
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"white":50, "xy":"0.3, 0.4"}}',
+                ),
+                (
+                    "test_light_rgb/state2",
+                    '{"state1":{"white":50, "xy":"0.3, 0.4"}}',
+                ),
+            ],
+            "on",
+            [("white_value", 75), ("xy_color", (0.4, 0.3))],
+        ),
+    ]
+
+    await help_test_discovery_update(
+        hass,
+        mqtt_mock,
+        caplog,
+        light.DOMAIN,
+        data1,
+        data2,
+        state_data1=state_data1,
+        state_data2=state_data2,
+    )
+
+
+async def test_discovery_update_light_template(hass, mqtt_mock, caplog):
+    """Test update of discovered light."""
+    data1 = json.dumps(
+        {
+            "name": "Beer",
+            "state_topic": "test_light_rgb/state1",
+            "command_topic": "test_light_rgb/set",
+            "brightness_command_topic": "test_light_rgb/state1",
+            "rgb_command_topic": "test_light_rgb/rgb/set",
+            "color_temp_command_topic": "test_light_rgb/state1",
+            "effect_command_topic": "test_light_rgb/effect/set",
+            "hs_command_topic": "test_light_rgb/hs/set",
+            "white_value_command_topic": "test_light_rgb/white_value/set",
+            "xy_command_topic": "test_light_rgb/xy/set",
+            "brightness_state_topic": "test_light_rgb/state1",
+            "color_temp_state_topic": "test_light_rgb/state1",
+            "effect_state_topic": "test_light_rgb/state1",
+            "hs_state_topic": "test_light_rgb/state1",
+            "rgb_state_topic": "test_light_rgb/state1",
+            "white_value_state_topic": "test_light_rgb/state1",
+            "xy_state_topic": "test_light_rgb/state1",
+            "state_value_template": "{{ value_json.state1.state }}",
+            "brightness_value_template": "{{ value_json.state1.brightness }}",
+            "color_temp_value_template": "{{ value_json.state1.ct }}",
+            "effect_value_template": "{{ value_json.state1.fx }}",
+            "hs_value_template": "{{ value_json.state1.hs }}",
+            "rgb_value_template": "{{ value_json.state1.rgb }}",
+            "white_value_template": "{{ value_json.state1.white }}",
+            "xy_value_template": "{{ value_json.state1.xy }}",
+        }
+    )
+
+    data2 = json.dumps(
+        {
+            "name": "Milk",
+            "state_topic": "test_light_rgb/state1",
+            "command_topic": "test_light_rgb/set",
+            "brightness_command_topic": "test_light_rgb/state1",
+            "rgb_command_topic": "test_light_rgb/rgb/set",
+            "color_temp_command_topic": "test_light_rgb/state1",
+            "effect_command_topic": "test_light_rgb/effect/set",
+            "hs_command_topic": "test_light_rgb/hs/set",
+            "white_value_command_topic": "test_light_rgb/white_value/set",
+            "xy_command_topic": "test_light_rgb/xy/set",
+            "brightness_state_topic": "test_light_rgb/state1",
+            "color_temp_state_topic": "test_light_rgb/state1",
+            "effect_state_topic": "test_light_rgb/state1",
+            "hs_state_topic": "test_light_rgb/state1",
+            "rgb_state_topic": "test_light_rgb/state1",
+            "white_value_state_topic": "test_light_rgb/state1",
+            "xy_state_topic": "test_light_rgb/state1",
+            "state_value_template": "{{ value_json.state2.state }}",
+            "brightness_value_template": "{{ value_json.state2.brightness }}",
+            "color_temp_value_template": "{{ value_json.state2.ct }}",
+            "effect_value_template": "{{ value_json.state2.fx }}",
+            "hs_value_template": "{{ value_json.state2.hs }}",
+            "rgb_value_template": "{{ value_json.state2.rgb }}",
+            "white_value_template": "{{ value_json.state2.white }}",
+            "xy_value_template": "{{ value_json.state2.xy }}",
+        }
+    )
+    state_data1 = [
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                )
+            ],
+            "on",
+            [("brightness", 100), ("color_temp", 123), ("effect", "cycle")],
+        ),
+        (
+            [("test_light_rgb/state1", '{"state1":{"state":"OFF"}}')],
+            "off",
+            None,
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "hs":"1,2"}}',
+                )
+            ],
+            "on",
+            [("hs_color", (1, 2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"rgb":"255,127,63"}}',
+                )
+            ],
+            "on",
+            [("rgb_color", (255, 127, 63))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"white":50, "xy":"0.3, 0.4"}}',
+                )
+            ],
+            "on",
+            [("white_value", 50), ("xy_color", (0.3, 0.401))],
+        ),
+    ]
+    state_data2 = [
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"state":"ON", "brightness":50, "ct":200, "fx":"loop"}}',
+                )
+            ],
+            "on",
+            [("brightness", 50), ("color_temp", 200), ("effect", "loop")],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "brightness":100, "ct":123, "fx":"cycle"}}',
+                ),
+            ],
+            "on",
+            [("brightness", 50), ("color_temp", 200), ("effect", "loop")],
+        ),
+        (
+            [("test_light_rgb/state1", '{"state1":{"state":"OFF"}}')],
+            "on",
+            None,
+        ),
+        (
+            [("test_light_rgb/state1", '{"state2":{"state":"OFF"}}')],
+            "off",
+            None,
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"state":"ON", "hs":"1.2,2.2"}}',
+                )
+            ],
+            "on",
+            [("hs_color", (1.2, 2.2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"state":"ON", "hs":"1,2"}}',
+                )
+            ],
+            "on",
+            [("hs_color", (1.2, 2.2))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"rgb":"63,127,255"}}',
+                )
+            ],
+            "on",
+            [("rgb_color", (63, 127, 255))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"rgb":"255,127,63"}}',
+                )
+            ],
+            "on",
+            [("rgb_color", (63, 127, 255))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state2":{"white":75, "xy":"0.4, 0.3"}}',
+                )
+            ],
+            "on",
+            [("white_value", 75), ("xy_color", (0.4, 0.3))],
+        ),
+        (
+            [
+                (
+                    "test_light_rgb/state1",
+                    '{"state1":{"white":50, "xy":"0.3, 0.4"}}',
+                )
+            ],
+            "on",
+            [("white_value", 75), ("xy_color", (0.4, 0.3))],
+        ),
+    ]
+
+    await help_test_discovery_update(
+        hass,
+        mqtt_mock,
+        caplog,
+        light.DOMAIN,
+        data1,
+        data2,
+        state_data1=state_data1,
+        state_data2=state_data2,
+    )
+
+
+async def test_discovery_update_unchanged_light(hass, mqtt_mock, caplog):
     """Test update of discovered light."""
     data1 = (
         '{ "name": "Beer",'
         '  "state_topic": "test_topic",'
         '  "command_topic": "test_topic" }'
     )
-    data2 = (
-        '{ "name": "Milk",'
-        '  "state_topic": "test_topic",'
-        '  "command_topic": "test_topic" }'
-    )
-    await help_test_discovery_update(
-        hass, mqtt_mock, caplog, light.DOMAIN, data1, data2
-    )
+    with patch(
+        "homeassistant.components.mqtt.light.schema_basic.MqttLight.discovery_update"
+    ) as discovery_update:
+        await help_test_discovery_update_unchanged(
+            hass, mqtt_mock, caplog, light.DOMAIN, data1, discovery_update
+        )
 
 
+@pytest.mark.no_fail_on_log_exception
 async def test_discovery_broken(hass, mqtt_mock, caplog):
     """Test handling of bad discovery message."""
     data1 = '{ "name": "Beer" }'
@@ -1345,6 +1989,82 @@ async def test_entity_device_info_remove(hass, mqtt_mock):
     )
 
 
-async def test_entity_id_update(hass, mqtt_mock):
+async def test_entity_id_update_subscriptions(hass, mqtt_mock):
     """Test MQTT subscriptions are managed when entity_id is updated."""
-    await help_test_entity_id_update(hass, mqtt_mock, light.DOMAIN, DEFAULT_CONFIG)
+    await help_test_entity_id_update_subscriptions(
+        hass, mqtt_mock, light.DOMAIN, DEFAULT_CONFIG
+    )
+
+
+async def test_entity_id_update_discovery_update(hass, mqtt_mock):
+    """Test MQTT discovery update when entity_id is updated."""
+    await help_test_entity_id_update_discovery_update(
+        hass, mqtt_mock, light.DOMAIN, DEFAULT_CONFIG
+    )
+
+
+async def test_entity_debug_info_message(hass, mqtt_mock):
+    """Test MQTT debug info."""
+    await help_test_entity_debug_info_message(
+        hass, mqtt_mock, light.DOMAIN, DEFAULT_CONFIG
+    )
+
+
+async def test_max_mireds(hass, mqtt_mock):
+    """Test setting min_mireds and max_mireds."""
+    config = {
+        light.DOMAIN: {
+            "platform": "mqtt",
+            "name": "test",
+            "command_topic": "test_max_mireds/set",
+            "color_temp_command_topic": "test_max_mireds/color_temp/set",
+            "max_mireds": 370,
+        }
+    }
+
+    assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("light.test")
+    assert state.attributes.get("min_mireds") == 153
+    assert state.attributes.get("max_mireds") == 370
+
+
+async def test_reloadable(hass, mqtt_mock):
+    """Test reloading an mqtt light."""
+    config = {
+        light.DOMAIN: {
+            "platform": "mqtt",
+            "name": "test",
+            "command_topic": "test/set",
+        }
+    }
+
+    assert await async_setup_component(hass, light.DOMAIN, config)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("light.test")
+    assert len(hass.states.async_all()) == 1
+
+    yaml_path = path.join(
+        _get_fixtures_base_path(),
+        "fixtures",
+        "mqtt/configuration.yaml",
+    )
+    with patch.object(hass_config, "YAML_CONFIG_FILE", yaml_path):
+        await hass.services.async_call(
+            "mqtt",
+            SERVICE_RELOAD,
+            {},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    assert len(hass.states.async_all()) == 1
+
+    assert hass.states.get("light.test") is None
+    assert hass.states.get("light.reload")
+
+
+def _get_fixtures_base_path():
+    return path.dirname(path.dirname(path.dirname(__file__)))

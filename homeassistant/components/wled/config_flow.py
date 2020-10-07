@@ -36,7 +36,7 @@ class WLEDFlowHandler(ConfigFlow, domain=DOMAIN):
     ) -> Dict[str, Any]:
         """Handle zeroconf discovery."""
         if user_input is None:
-            return self.async_abort(reason="connection_error")
+            return self.async_abort(reason="cannot_connect")
 
         # Hostname is format: wled-livingroom.local.
         host = user_input["hostname"].rstrip(".")
@@ -45,7 +45,7 @@ class WLEDFlowHandler(ConfigFlow, domain=DOMAIN):
         # pylint: disable=no-member # https://github.com/PyCQA/pylint/issues/3167
         self.context.update(
             {
-                CONF_HOST: host,
+                CONF_HOST: user_input["host"],
                 CONF_NAME: name,
                 CONF_MAC: user_input["properties"].get(CONF_MAC),
                 "title_placeholders": {"name": name},
@@ -86,8 +86,8 @@ class WLEDFlowHandler(ConfigFlow, domain=DOMAIN):
                 device = await wled.update()
             except WLEDConnectionError:
                 if source == SOURCE_ZEROCONF:
-                    return self.async_abort(reason="connection_error")
-                return self._show_setup_form({"base": "connection_error"})
+                    return self.async_abort(reason="cannot_connect")
+                return self._show_setup_form({"base": "cannot_connect"})
             user_input[CONF_MAC] = device.info.mac_address
 
         # Check if already configured

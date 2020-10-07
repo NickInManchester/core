@@ -1,0 +1,34 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "El servei ja est\u00e0 configurat"
+        },
+        "error": {
+            "cannot_connect": "Ha fallat la connexi\u00f3",
+            "invalid_auth": "Autenticaci\u00f3 inv\u00e0lida",
+            "unknown": "Error inesperat"
+        },
+        "flow_title": "Smile: {name}",
+        "step": {
+            "user": {
+                "data": {
+                    "host": "Adre\u00e7a IP",
+                    "password": "ID de Smile",
+                    "port": "Port"
+                },
+                "description": "Introdueix:",
+                "title": "Connecta't amb el Smile"
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "scan_interval": "Interval d'escaneig (segons)"
+                },
+                "description": "Ajusta les opcions de Plugwise"
+            }
+        }
+    }
+}

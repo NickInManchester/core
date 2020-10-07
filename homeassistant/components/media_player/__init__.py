@@ -7,17 +7,27 @@ import functools as ft
 import hashlib
 import logging
 from random import SystemRandom
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from aiohttp import web
 from aiohttp.hdrs import CACHE_CONTROL, CONTENT_TYPE
+from aiohttp.typedefs import LooseHeaders
 import async_timeout
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.components.http import KEY_AUTHENTICATED, HomeAssistantView
+from homeassistant.components.websocket_api.const import (
+    ERR_NOT_FOUND,
+    ERR_NOT_SUPPORTED,
+    ERR_UNKNOWN_ERROR,
+)
 from homeassistant.const import (
+    HTTP_INTERNAL_SERVER_ERROR,
+    HTTP_NOT_FOUND,
+    HTTP_OK,
+    HTTP_UNAUTHORIZED,
     SERVICE_MEDIA_NEXT_TRACK,
     SERVICE_MEDIA_PAUSE,
     SERVICE_MEDIA_PLAY,
@@ -45,6 +55,7 @@ from homeassistant.helpers.config_validation import (  # noqa: F401
 )
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.network import get_url
 from homeassistant.loader import bind_hass
 
 from .const import (
@@ -61,6 +72,7 @@ from .const import (
     ATTR_MEDIA_DURATION,
     ATTR_MEDIA_ENQUEUE,
     ATTR_MEDIA_EPISODE,
+    ATTR_MEDIA_EXTRA,
     ATTR_MEDIA_PLAYLIST,
     ATTR_MEDIA_POSITION,
     ATTR_MEDIA_POSITION_UPDATED_AT,
@@ -75,10 +87,12 @@ from .const import (
     ATTR_SOUND_MODE,
     ATTR_SOUND_MODE_LIST,
     DOMAIN,
+    MEDIA_CLASS_DIRECTORY,
     SERVICE_CLEAR_PLAYLIST,
     SERVICE_PLAY_MEDIA,
     SERVICE_SELECT_SOUND_MODE,
     SERVICE_SELECT_SOURCE,
+    SUPPORT_BROWSE_MEDIA,
     SUPPORT_CLEAR_PLAYLIST,
     SUPPORT_NEXT_TRACK,
     SUPPORT_PAUSE,
@@ -96,6 +110,7 @@ from .const import (
     SUPPORT_VOLUME_SET,
     SUPPORT_VOLUME_STEP,
 )
+from .errors import BrowseError
 
 # mypy: allow-untyped-defs, no-check-untyped-defs
 
@@ -115,8 +130,9 @@ SCAN_INTERVAL = timedelta(seconds=10)
 
 DEVICE_CLASS_TV = "tv"
 DEVICE_CLASS_SPEAKER = "speaker"
+DEVICE_CLASS_RECEIVER = "receiver"
 
-DEVICE_CLASSES = [DEVICE_CLASS_TV, DEVICE_CLASS_SPEAKER]
+DEVICE_CLASSES = [DEVICE_CLASS_TV, DEVICE_CLASS_SPEAKER, DEVICE_CLASS_RECEIVER]
 
 DEVICE_CLASSES_SCHEMA = vol.All(vol.Lower, vol.In(DEVICE_CLASSES))
 
@@ -125,6 +141,7 @@ MEDIA_PLAYER_PLAY_MEDIA_SCHEMA = {
     vol.Required(ATTR_MEDIA_CONTENT_TYPE): cv.string,
     vol.Required(ATTR_MEDIA_CONTENT_ID): cv.string,
     vol.Optional(ATTR_MEDIA_ENQUEUE): cv.boolean,
+    vol.Optional(ATTR_MEDIA_EXTRA, default={}): dict,
 }
 
 ATTR_TO_PROPERTY = [
@@ -166,12 +183,6 @@ def is_on(hass, entity_id=None):
     )
 
 
-WS_TYPE_MEDIA_PLAYER_THUMBNAIL = "media_player_thumbnail"
-SCHEMA_WEBSOCKET_GET_THUMBNAIL = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
-    {"type": WS_TYPE_MEDIA_PLAYER_THUMBNAIL, "entity_id": cv.entity_id}
-)
-
-
 def _rename_keys(**keys):
     """Create validator that renames keys.
 
@@ -195,11 +206,8 @@ async def async_setup(hass, config):
         logging.getLogger(__name__), DOMAIN, hass, SCAN_INTERVAL
     )
 
-    hass.components.websocket_api.async_register_command(
-        WS_TYPE_MEDIA_PLAYER_THUMBNAIL,
-        websocket_handle_thumbnail,
-        SCHEMA_WEBSOCKET_GET_THUMBNAIL,
-    )
+    hass.components.websocket_api.async_register_command(websocket_handle_thumbnail)
+    hass.components.websocket_api.async_register_command(websocket_browse_media)
     hass.http.register_view(MediaPlayerImageView(component))
 
     await component.async_setup(config)
@@ -211,7 +219,7 @@ async def async_setup(hass, config):
         SERVICE_TURN_OFF, {}, "async_turn_off", [SUPPORT_TURN_OFF]
     )
     component.async_register_entity_service(
-        SERVICE_TOGGLE, {}, "async_toggle", [SUPPORT_TURN_OFF | SUPPORT_TURN_ON],
+        SERVICE_TOGGLE, {}, "async_toggle", [SUPPORT_TURN_OFF | SUPPORT_TURN_ON]
     )
     component.async_register_entity_service(
         SERVICE_VOLUME_UP,
@@ -241,7 +249,7 @@ async def async_setup(hass, config):
         SERVICE_MEDIA_STOP, {}, "async_media_stop", [SUPPORT_STOP]
     )
     component.async_register_entity_service(
-        SERVICE_MEDIA_NEXT_TRACK, {}, "async_media_next_track", [SUPPORT_NEXT_TRACK],
+        SERVICE_MEDIA_NEXT_TRACK, {}, "async_media_next_track", [SUPPORT_NEXT_TRACK]
     )
     component.async_register_entity_service(
         SERVICE_MEDIA_PREVIOUS_TRACK,
@@ -250,7 +258,7 @@ async def async_setup(hass, config):
         [SUPPORT_PREVIOUS_TRACK],
     )
     component.async_register_entity_service(
-        SERVICE_CLEAR_PLAYLIST, {}, "async_clear_playlist", [SUPPORT_CLEAR_PLAYLIST],
+        SERVICE_CLEAR_PLAYLIST, {}, "async_clear_playlist", [SUPPORT_CLEAR_PLAYLIST]
     )
     component.async_register_entity_service(
         SERVICE_VOLUME_SET,
@@ -334,8 +342,8 @@ async def async_unload_entry(hass, entry):
     return await hass.data[DOMAIN].async_unload_entry(entry)
 
 
-class MediaPlayerDevice(Entity):
-    """ABC for media player devices."""
+class MediaPlayerEntity(Entity):
+    """ABC for media player entities."""
 
     _access_token: Optional[str] = None
 
@@ -807,6 +815,18 @@ class MediaPlayerDevice(Entity):
 
         return state_attr
 
+    async def async_browse_media(
+        self,
+        media_content_type: Optional[str] = None,
+        media_content_id: Optional[str] = None,
+    ) -> "BrowseMedia":
+        """Return a BrowseMedia instance.
+
+        The BrowseMedia instance will be used by the
+        "media_player/browse_media" websocket command.
+        """
+        raise NotImplementedError()
+
 
 async def _async_fetch_image(hass, url):
     """Fetch image.
@@ -817,7 +837,7 @@ async def _async_fetch_image(hass, url):
     cache_maxsize = ENTITY_IMAGE_CACHE[CACHE_MAXSIZE]
 
     if urlparse(url).hostname is None:
-        url = hass.config.api.base_url + url
+        url = f"{get_url(hass)}{url}"
 
     if url not in cache_images:
         cache_images[url] = {CACHE_LOCK: asyncio.Lock()}
@@ -832,7 +852,7 @@ async def _async_fetch_image(hass, url):
             with async_timeout.timeout(10):
                 response = await websession.get(url)
 
-                if response.status == 200:
+                if response.status == HTTP_OK:
                     content = await response.read()
                     content_type = response.headers.get(CONTENT_TYPE)
                     if content_type:
@@ -859,11 +879,11 @@ class MediaPlayerImageView(HomeAssistantView):
         """Initialize a media player view."""
         self.component = component
 
-    async def get(self, request, entity_id):
+    async def get(self, request: web.Request, entity_id: str) -> web.Response:
         """Start a get request."""
         player = self.component.get_entity(entity_id)
         if player is None:
-            status = 404 if request[KEY_AUTHENTICATED] else 401
+            status = HTTP_NOT_FOUND if request[KEY_AUTHENTICATED] else HTTP_UNAUTHORIZED
             return web.Response(status=status)
 
         authenticated = (
@@ -872,17 +892,23 @@ class MediaPlayerImageView(HomeAssistantView):
         )
 
         if not authenticated:
-            return web.Response(status=401)
+            return web.Response(status=HTTP_UNAUTHORIZED)
 
         data, content_type = await player.async_get_media_image()
 
         if data is None:
-            return web.Response(status=500)
+            return web.Response(status=HTTP_INTERNAL_SERVER_ERROR)
 
-        headers = {CACHE_CONTROL: "max-age=3600"}
+        headers: LooseHeaders = {CACHE_CONTROL: "max-age=3600"}
         return web.Response(body=data, content_type=content_type, headers=headers)
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "media_player_thumbnail",
+        vol.Required("entity_id"): cv.entity_id,
+    }
+)
 @websocket_api.async_response
 async def websocket_handle_thumbnail(hass, connection, msg):
     """Handle get media player cover command.
@@ -894,14 +920,12 @@ async def websocket_handle_thumbnail(hass, connection, msg):
 
     if player is None:
         connection.send_message(
-            websocket_api.error_message(
-                msg["id"], "entity_not_found", "Entity not found"
-            )
+            websocket_api.error_message(msg["id"], ERR_NOT_FOUND, "Entity not found")
         )
         return
 
     _LOGGER.warning(
-        "The websocket command media_player_thumbnail is deprecated. Use /api/media_player_proxy instead."
+        "The websocket command media_player_thumbnail is deprecated. Use /api/media_player_proxy instead"
     )
 
     data, content_type = await player.async_get_media_image()
@@ -921,3 +945,154 @@ async def websocket_handle_thumbnail(hass, connection, msg):
             "content": base64.b64encode(data).decode("utf-8"),
         },
     )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "media_player/browse_media",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Inclusive(
+            ATTR_MEDIA_CONTENT_TYPE,
+            "media_ids",
+            "media_content_type and media_content_id must be provided together",
+        ): str,
+        vol.Inclusive(
+            ATTR_MEDIA_CONTENT_ID,
+            "media_ids",
+            "media_content_type and media_content_id must be provided together",
+        ): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_browse_media(hass, connection, msg):
+    """
+    Browse media available to the media_player entity.
+
+    To use, media_player integrations can implement MediaPlayerEntity.async_browse_media()
+    """
+    component = hass.data[DOMAIN]
+    player: Optional[MediaPlayerDevice] = component.get_entity(msg["entity_id"])
+
+    if player is None:
+        connection.send_error(msg["id"], "entity_not_found", "Entity not found")
+        return
+
+    if not player.supported_features & SUPPORT_BROWSE_MEDIA:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], ERR_NOT_SUPPORTED, "Player does not support browsing media"
+            )
+        )
+        return
+
+    media_content_type = msg.get(ATTR_MEDIA_CONTENT_TYPE)
+    media_content_id = msg.get(ATTR_MEDIA_CONTENT_ID)
+
+    try:
+        payload = await player.async_browse_media(media_content_type, media_content_id)
+    except NotImplementedError:
+        _LOGGER.error(
+            "%s allows media browsing but its integration (%s) does not",
+            player.entity_id,
+            player.platform.platform_name,
+        )
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"],
+                ERR_NOT_SUPPORTED,
+                "Integration does not support browsing media",
+            )
+        )
+        return
+    except BrowseError as err:
+        connection.send_message(
+            websocket_api.error_message(msg["id"], ERR_UNKNOWN_ERROR, str(err))
+        )
+        return
+
+    # For backwards compat
+    if isinstance(payload, BrowseMedia):
+        payload = payload.as_dict()
+    else:
+        _LOGGER.warning("Browse Media should use new BrowseMedia class")
+
+    connection.send_result(msg["id"], payload)
+
+
+class MediaPlayerDevice(MediaPlayerEntity):
+    """ABC for media player devices (for backwards compatibility)."""
+
+    def __init_subclass__(cls, **kwargs):
+        """Print deprecation warning."""
+        super().__init_subclass__(**kwargs)
+        _LOGGER.warning(
+            "MediaPlayerDevice is deprecated, modify %s to extend MediaPlayerEntity",
+            cls.__name__,
+        )
+
+
+class BrowseMedia:
+    """Represent a browsable media file."""
+
+    def __init__(
+        self,
+        *,
+        media_class: str,
+        media_content_id: str,
+        media_content_type: str,
+        title: str,
+        can_play: bool,
+        can_expand: bool,
+        children: Optional[List["BrowseMedia"]] = None,
+        children_media_class: Optional[str] = None,
+        thumbnail: Optional[str] = None,
+    ):
+        """Initialize browse media item."""
+        self.media_class = media_class
+        self.media_content_id = media_content_id
+        self.media_content_type = media_content_type
+        self.title = title
+        self.can_play = can_play
+        self.can_expand = can_expand
+        self.children = children
+        self.children_media_class = children_media_class
+        self.thumbnail = thumbnail
+
+    def as_dict(self, *, parent: bool = True) -> dict:
+        """Convert Media class to browse media dictionary."""
+        if self.children_media_class is None:
+            self.calculate_children_class()
+
+        response = {
+            "title": self.title,
+            "media_class": self.media_class,
+            "media_content_type": self.media_content_type,
+            "media_content_id": self.media_content_id,
+            "can_play": self.can_play,
+            "can_expand": self.can_expand,
+            "children_media_class": self.children_media_class,
+            "thumbnail": self.thumbnail,
+        }
+
+        if not parent:
+            return response
+
+        if self.children:
+            response["children"] = [
+                child.as_dict(parent=False) for child in self.children
+            ]
+        else:
+            response["children"] = []
+
+        return response
+
+    def calculate_children_class(self) -> None:
+        """Count the children media classes and calculate the correct class."""
+        if self.children is None or len(self.children) == 0:
+            return
+
+        self.children_media_class = MEDIA_CLASS_DIRECTORY
+
+        proposed_class = self.children[0].media_class
+        if all(child.media_class == proposed_class for child in self.children):
+            self.children_media_class = proposed_class

@@ -1,6 +1,5 @@
 """Support for Homekit device discovery."""
 import logging
-import os
 from typing import Any, Dict
 
 import aiohomekit
@@ -12,13 +11,13 @@ from aiohomekit.model.characteristics import (
 )
 from aiohomekit.model.services import Service, ServicesTypes
 
+from homeassistant.components import zeroconf
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import Entity
 
 from .config_flow import normalize_hkid
 from .connection import HKDevice
-from .const import CONTROLLER, DOMAIN, ENTITY_MAP, KNOWN_DEVICES
+from .const import CONTROLLER, DOMAIN, ENTITY_MAP, KNOWN_DEVICES, TRIGGERS
 from .storage import EntityMapStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -190,21 +189,6 @@ async def async_setup_entry(hass, entry):
         del hass.data[KNOWN_DEVICES][conn.unique_id]
         raise ConfigEntryNotReady
 
-    conn_info = conn.connection_info
-
-    device_registry = await dr.async_get_registry(hass)
-    device_registry.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={
-            (DOMAIN, "serial-number", conn_info["serial-number"]),
-            (DOMAIN, "accessory-id", conn.unique_id),
-        },
-        name=conn.name,
-        manufacturer=conn_info.get("manufacturer"),
-        model=conn_info.get("model"),
-        sw_version=conn_info.get("firmware.revision"),
-    )
-
     return True
 
 
@@ -213,18 +197,10 @@ async def async_setup(hass, config):
     map_storage = hass.data[ENTITY_MAP] = EntityMapStorage(hass)
     await map_storage.async_initialize()
 
-    hass.data[CONTROLLER] = aiohomekit.Controller()
+    zeroconf_instance = await zeroconf.async_get_instance(hass)
+    hass.data[CONTROLLER] = aiohomekit.Controller(zeroconf_instance=zeroconf_instance)
     hass.data[KNOWN_DEVICES] = {}
-
-    dothomekit_dir = hass.config.path(".homekit")
-    if os.path.exists(dothomekit_dir):
-        _LOGGER.warning(
-            (
-                "Legacy homekit_controller state found in %s. Support for reading "
-                "the folder is deprecated and will be removed in 0.109.0."
-            ),
-            dothomekit_dir,
-        )
+    hass.data[TRIGGERS] = {}
 
     return True
 

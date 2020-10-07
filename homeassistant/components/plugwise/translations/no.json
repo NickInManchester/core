@@ -1,0 +1,34 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "Tjenesten er allerede konfigurert"
+        },
+        "error": {
+            "cannot_connect": "Tilkobling mislyktes.",
+            "invalid_auth": "Ugyldig godkjenning",
+            "unknown": "Uventet feil"
+        },
+        "flow_title": "",
+        "step": {
+            "user": {
+                "data": {
+                    "host": "IP adresse",
+                    "password": "",
+                    "port": "Port"
+                },
+                "description": "Vennligst skriv inn:",
+                "title": "Koble til Smile"
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "scan_interval": "Skanneintervall (sekunder)"
+                },
+                "description": "Juster Plugwise-alternativer"
+            }
+        }
+    }
+}

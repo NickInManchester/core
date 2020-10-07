@@ -1,11 +1,13 @@
 """Alexa entity adapters."""
-from typing import List
+import logging
+from typing import TYPE_CHECKING, List
 
 from homeassistant.components import (
     alarm_control_panel,
     alert,
     automation,
     binary_sensor,
+    camera,
     cover,
     fan,
     group,
@@ -31,13 +33,17 @@ from homeassistant.const import (
     CONF_NAME,
     TEMP_CELSIUS,
     TEMP_FAHRENHEIT,
+    __version__,
 )
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.helpers import network
 from homeassistant.util.decorator import Registry
 
 from .capabilities import (
     Alexa,
     AlexaBrightnessController,
+    AlexaCameraStreamController,
+    AlexaCapability,
     AlexaChannelController,
     AlexaColorController,
     AlexaColorTemperatureController,
@@ -67,6 +73,11 @@ from .capabilities import (
     AlexaToggleController,
 )
 from .const import CONF_DESCRIPTION, CONF_DISPLAY_CATEGORIES
+
+if TYPE_CHECKING:
+    from .config import AbstractConfig
+
+_LOGGER = logging.getLogger(__name__)
 
 ENTITY_ADAPTERS = Registry()
 
@@ -191,13 +202,18 @@ class DisplayCategory:
     WEARABLE = "WEARABLE"
 
 
+def generate_alexa_id(entity_id: str) -> str:
+    """Return the alexa ID for an entity ID."""
+    return entity_id.replace(".", "#").translate(TRANSLATION_TABLE)
+
+
 class AlexaEntity:
     """An adaptation of an entity, expressed in Alexa's terms.
 
     The API handlers should manipulate entities only through this interface.
     """
 
-    def __init__(self, hass, config, entity):
+    def __init__(self, hass: HomeAssistant, config: "AbstractConfig", entity: State):
         """Initialize Alexa Entity."""
         self.hass = hass
         self.config = config
@@ -222,7 +238,7 @@ class AlexaEntity:
 
     def alexa_id(self):
         """Return the Alexa API entity id."""
-        return self.entity.entity_id.replace(".", "#").translate(TRANSLATION_TABLE)
+        return generate_alexa_id(self.entity.entity_id)
 
     def display_categories(self):
         """Return a list of display categories."""
@@ -240,14 +256,13 @@ class AlexaEntity:
         """
         raise NotImplementedError
 
-    def get_interface(self, capability):
+    def get_interface(self, capability) -> AlexaCapability:
         """Return the given AlexaInterface.
 
         Raises _UnsupportedInterface.
         """
-        pass
 
-    def interfaces(self):
+    def interfaces(self) -> List[AlexaCapability]:
         """Return a list of supported interfaces.
 
         Used for discovery. The list should contain AlexaInterface instances.
@@ -261,8 +276,7 @@ class AlexaEntity:
             if not interface.properties_proactively_reported():
                 continue
 
-            for prop in interface.serialize_properties():
-                yield prop
+            yield from interface.serialize_properties()
 
     def serialize_discovery(self):
         """Serialize the entity for discovery."""
@@ -273,13 +287,28 @@ class AlexaEntity:
             "friendlyName": self.friendly_name(),
             "description": self.description(),
             "manufacturerName": "Home Assistant",
+            "additionalAttributes": {
+                "manufacturer": "Home Assistant",
+                "model": self.entity.domain,
+                "softwareVersion": __version__,
+                "customIdentifier": self.entity_id,
+            },
         }
 
         locale = self.config.locale
         capabilities = []
+
         for i in self.interfaces():
-            if locale in i.supported_locales:
+            if locale not in i.supported_locales:
+                continue
+
+            try:
                 capabilities.append(i.serialize_discovery())
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception(
+                    "Error serializing %s discovery for %s", i.name(), self.entity
+                )
+
         result["capabilities"] = capabilities
 
         return result
@@ -379,7 +408,7 @@ class CoverCapabilities(AlexaEntity):
     def default_display_categories(self):
         """Return the display categories for this entity."""
         device_class = self.entity.attributes.get(ATTR_DEVICE_CLASS)
-        if device_class == cover.DEVICE_CLASS_GARAGE:
+        if device_class in (cover.DEVICE_CLASS_GARAGE, cover.DEVICE_CLASS_GATE):
             return [DisplayCategory.GARAGE_DOOR]
         if device_class == cover.DEVICE_CLASS_DOOR:
             return [DisplayCategory.DOOR]
@@ -401,7 +430,7 @@ class CoverCapabilities(AlexaEntity):
     def interfaces(self):
         """Yield the supported interfaces."""
         device_class = self.entity.attributes.get(ATTR_DEVICE_CLASS)
-        if device_class != cover.DEVICE_CLASS_GARAGE:
+        if device_class not in (cover.DEVICE_CLASS_GARAGE, cover.DEVICE_CLASS_GATE):
             yield AlexaPowerController(self.entity)
 
         supported = self.entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
@@ -541,7 +570,11 @@ class MediaPlayerCapabilities(AlexaEntity):
             yield AlexaChannelController(self.entity)
 
         if supported & media_player.const.SUPPORT_SELECT_SOUND_MODE:
-            yield AlexaEqualizerController(self.entity)
+            inputs = AlexaInputController.get_valid_inputs(
+                self.entity.attributes.get(media_player.const.ATTR_SOUND_MODE_LIST, [])
+            )
+            if len(inputs) > 0:
+                yield AlexaEqualizerController(self.entity)
 
         yield AlexaEndpointHealth(self.hass, self.entity)
         yield Alexa(self.hass)
@@ -580,9 +613,8 @@ class ScriptCapabilities(AlexaEntity):
 
     def interfaces(self):
         """Yield the supported interfaces."""
-        can_cancel = bool(self.entity.attributes.get("can_cancel"))
         return [
-            AlexaSceneController(self.entity, supports_deactivation=can_cancel),
+            AlexaSceneController(self.entity, supports_deactivation=True),
             Alexa(self.hass),
         ]
 
@@ -763,3 +795,47 @@ class VacuumCapabilities(AlexaEntity):
 
         yield AlexaEndpointHealth(self.hass, self.entity)
         yield Alexa(self.hass)
+
+
+@ENTITY_ADAPTERS.register(camera.DOMAIN)
+class CameraCapabilities(AlexaEntity):
+    """Class to represent Camera capabilities."""
+
+    def default_display_categories(self):
+        """Return the display categories for this entity."""
+        return [DisplayCategory.CAMERA]
+
+    def interfaces(self):
+        """Yield the supported interfaces."""
+        if self._check_requirements():
+            supported = self.entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
+            if supported & camera.SUPPORT_STREAM:
+                yield AlexaCameraStreamController(self.entity)
+
+        yield AlexaEndpointHealth(self.hass, self.entity)
+        yield Alexa(self.hass)
+
+    def _check_requirements(self):
+        """Check the hass URL for HTTPS scheme."""
+        if "stream" not in self.hass.config.components:
+            _LOGGER.debug(
+                "%s requires stream component for AlexaCameraStreamController",
+                self.entity_id,
+            )
+            return False
+
+        try:
+            network.get_url(
+                self.hass,
+                allow_internal=False,
+                allow_ip=False,
+                require_ssl=True,
+                require_standard_port=True,
+            )
+        except network.NoURLAvailableError:
+            _LOGGER.debug(
+                "%s requires HTTPS for AlexaCameraStreamController", self.entity_id
+            )
+            return False
+
+        return True

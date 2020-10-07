@@ -3,7 +3,7 @@ import logging
 
 from aiohomekit.model.characteristics import CharacteristicsTypes
 
-from homeassistant.components.alarm_control_panel import AlarmControlPanel
+from homeassistant.components.alarm_control_panel import AlarmControlPanelEntity
 from homeassistant.components.alarm_control_panel.const import (
     SUPPORT_ALARM_ARM_AWAY,
     SUPPORT_ALARM_ARM_HOME,
@@ -51,13 +51,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         if service["stype"] != "security-system":
             return False
         info = {"aid": aid, "iid": service["iid"]}
-        async_add_entities([HomeKitAlarmControlPanel(conn, info)], True)
+        async_add_entities([HomeKitAlarmControlPanelEntity(conn, info)], True)
         return True
 
     conn.add_listener(async_add_service)
 
 
-class HomeKitAlarmControlPanel(HomeKitEntity, AlarmControlPanel):
+class HomeKitAlarmControlPanelEntity(HomeKitEntity, AlarmControlPanelEntity):
     """Representation of a Homekit Alarm Control Panel."""
 
     def get_characteristic_types(self):
@@ -110,10 +110,8 @@ class HomeKitAlarmControlPanel(HomeKitEntity, AlarmControlPanel):
     @property
     def device_state_attributes(self):
         """Return the optional state attributes."""
-        attributes = {}
-
         battery_level = self.service.value(CharacteristicsTypes.BATTERY_LEVEL)
-        if battery_level:
-            attributes[ATTR_BATTERY_LEVEL] = battery_level
 
-        return attributes
+        if not battery_level:
+            return {}
+        return {ATTR_BATTERY_LEVEL: battery_level}

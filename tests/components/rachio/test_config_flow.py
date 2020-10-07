@@ -1,7 +1,4 @@
 """Test the Rachio config flow."""
-from asynctest import patch
-from asynctest.mock import MagicMock
-
 from homeassistant import config_entries, setup
 from homeassistant.components.rachio.const import (
     CONF_CUSTOM_URL,
@@ -9,6 +6,9 @@ from homeassistant.components.rachio.const import (
     DOMAIN,
 )
 from homeassistant.const import CONF_API_KEY
+
+from tests.async_mock import MagicMock, patch
+from tests.common import MockConfigEntry
 
 
 def _mock_rachio_return_value(get=None, getInfo=None):
@@ -39,7 +39,8 @@ async def test_form(hass):
     ), patch(
         "homeassistant.components.rachio.async_setup", return_value=True
     ) as mock_setup, patch(
-        "homeassistant.components.rachio.async_setup_entry", return_value=True,
+        "homeassistant.components.rachio.async_setup_entry",
+        return_value=True,
     ) as mock_setup_entry:
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -76,7 +77,8 @@ async def test_form_invalid_auth(hass):
         "homeassistant.components.rachio.config_flow.Rachio", return_value=rachio_mock
     ):
         result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_API_KEY: "api_key"},
+            result["flow_id"],
+            {CONF_API_KEY: "api_key"},
         )
 
     assert result2["type"] == "form"
@@ -97,8 +99,39 @@ async def test_form_cannot_connect(hass):
         "homeassistant.components.rachio.config_flow.Rachio", return_value=rachio_mock
     ):
         result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_API_KEY: "api_key"},
+            result["flow_id"],
+            {CONF_API_KEY: "api_key"},
         )
 
     assert result2["type"] == "form"
     assert result2["errors"] == {"base": "cannot_connect"}
+
+
+async def test_form_homekit(hass):
+    """Test that we abort from homekit if rachio is already setup."""
+    await setup.async_setup_component(hass, "persistent_notification", {})
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "homekit"},
+        data={"properties": {"id": "AA:BB:CC:DD:EE:FF"}},
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {}
+    flow = next(
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["flow_id"] == result["flow_id"]
+    )
+    assert flow["context"]["unique_id"] == "AA:BB:CC:DD:EE:FF"
+
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_API_KEY: "api_key"})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "homekit"},
+        data={"properties": {"id": "AA:BB:CC:DD:EE:FF"}},
+    )
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"

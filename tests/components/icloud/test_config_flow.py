@@ -1,6 +1,4 @@
 """Tests for the iCloud config flow."""
-from unittest.mock import MagicMock, Mock, patch
-
 from pyicloud.exceptions import PyiCloudFailedLoginException
 import pytest
 
@@ -22,6 +20,7 @@ from homeassistant.config_entries import SOURCE_IMPORT, SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.typing import HomeAssistantType
 
+from tests.async_mock import MagicMock, Mock, patch
 from tests.common import MockConfigEntry
 
 USERNAME = "username@me.com"
@@ -276,7 +275,7 @@ async def test_login_failed(hass: HomeAssistantType):
             data={CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD},
         )
         assert result["type"] == data_entry_flow.RESULT_TYPE_FORM
-        assert result["errors"] == {CONF_USERNAME: "login"}
+        assert result["errors"] == {CONF_USERNAME: "invalid_auth"}
 
 
 async def test_no_device(

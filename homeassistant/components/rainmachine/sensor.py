@@ -1,6 +1,7 @@
 """This platform provides support for sensor data from RainMachine."""
 import logging
 
+from homeassistant.const import TEMP_CELSIUS, VOLUME_CUBIC_METERS
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
@@ -25,7 +26,7 @@ SENSORS = {
     TYPE_FLOW_SENSOR_CLICK_M3: (
         "Flow Sensor Clicks",
         "mdi:water-pump",
-        "clicks/m^3",
+        f"clicks/{VOLUME_CUBIC_METERS}",
         None,
         False,
         DATA_PROVISION_SETTINGS,
@@ -57,7 +58,7 @@ SENSORS = {
     TYPE_FREEZE_TEMP: (
         "Freeze Protect Temperature",
         "mdi:thermometer",
-        "°C",
+        TEMP_CELSIUS,
         "temperature",
         True,
         DATA_RESTRICTIONS_UNIVERSAL,
@@ -84,7 +85,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensor_type,
                 (name, icon, unit, device_class, enabled_by_default, api_category),
             ) in SENSORS.items()
-        ],
+        ]
     )
 
 
@@ -132,7 +133,7 @@ class RainMachineSensor(RainMachineEntity):
     @property
     def unique_id(self) -> str:
         """Return a unique, Home Assistant friendly identifier for this entity."""
-        return "{0}_{1}".format(
+        return "{}_{}".format(
             self.rainmachine.device_mac.replace(":", ""), self._sensor_type
         )
 
@@ -143,7 +144,7 @@ class RainMachineSensor(RainMachineEntity):
 
     async def async_added_to_hass(self):
         """Register callbacks."""
-        self._dispatcher_handlers.append(
+        self.async_on_remove(
             async_dispatcher_connect(self.hass, SENSOR_UPDATE_TOPIC, self._update_state)
         )
         await self.rainmachine.async_register_sensor_api_interest(self._api_category)
