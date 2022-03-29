@@ -3,19 +3,23 @@
 from collections import OrderedDict
 from datetime import timedelta
 import logging
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import voluptuous as vol
 
-from homeassistant.const import ENTITY_MATCH_ALL, ENTITY_MATCH_NONE
+from homeassistant.const import (
+    ENTITY_MATCH_ALL,
+    ENTITY_MATCH_NONE,
+    EVENT_HOMEASSISTANT_STOP,
+)
 import homeassistant.core as ha
 from homeassistant.exceptions import PlatformNotReady
 from homeassistant.helpers import discovery
-from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.entity_component import EntityComponent, async_update_entity
 from homeassistant.setup import async_setup_component
 import homeassistant.util.dt as dt_util
 
-from tests.async_mock import AsyncMock, Mock, patch
 from tests.common import (
     MockConfigEntry,
     MockEntity,
@@ -381,7 +385,7 @@ async def test_update_entity(hass):
     # Called as part of async_add_entities
     assert len(entity.async_write_ha_state.mock_calls) == 1
 
-    await hass.helpers.entity_component.async_update_entity(entity.entity_id)
+    await async_update_entity(hass, entity.entity_id)
 
     assert len(entity.async_update_ha_state.mock_calls) == 1
     assert entity.async_update_ha_state.mock_calls[-1][1][0] is True
@@ -487,3 +491,25 @@ async def test_register_entity_service(hass):
         DOMAIN, "hello", {"area_id": ENTITY_MATCH_NONE, "some": "data"}, blocking=True
     )
     assert len(calls) == 2
+
+
+async def test_platforms_shutdown_on_stop(hass):
+    """Test that we shutdown platforms on stop."""
+    platform1_setup = Mock(side_effect=[PlatformNotReady, PlatformNotReady, None])
+    mock_integration(hass, MockModule("mod1"))
+    mock_entity_platform(hass, "test_domain.mod1", MockPlatform(platform1_setup))
+
+    component = EntityComponent(_LOGGER, DOMAIN, hass)
+
+    await component.async_setup({DOMAIN: {"platform": "mod1"}})
+    await hass.async_block_till_done()
+    assert len(platform1_setup.mock_calls) == 1
+    assert "test_domain.mod1" not in hass.config.components
+
+    with patch.object(
+        component._platforms[DOMAIN], "async_shutdown"
+    ) as mock_async_shutdown:
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+        await hass.async_block_till_done()
+
+    assert mock_async_shutdown.called

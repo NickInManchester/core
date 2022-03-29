@@ -1,5 +1,6 @@
 """Support for hunter douglas shades."""
 import asyncio
+from contextlib import suppress
 import logging
 
 from aiopvapi.helpers.constants import ATTR_POSITION1, ATTR_POSITION_DATA
@@ -13,14 +14,16 @@ import async_timeout
 
 from homeassistant.components.cover import (
     ATTR_POSITION,
-    DEVICE_CLASS_SHADE,
     SUPPORT_CLOSE,
     SUPPORT_OPEN,
     SUPPORT_SET_POSITION,
     SUPPORT_STOP,
+    CoverDeviceClass,
     CoverEntity,
 )
-from homeassistant.core import callback
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
 from .const import (
@@ -48,7 +51,9 @@ TRANSITION_COMPLETE_DURATION = 30
 PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the hunter douglas shades."""
 
     pv_data = hass.data[DOMAIN][entry.entry_id]
@@ -65,21 +70,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
         # possible
         shade = PvShade(raw_shade, pv_request)
         name_before_refresh = shade.name
-        try:
+        with suppress(asyncio.TimeoutError):
             async with async_timeout.timeout(1):
                 await shade.refresh()
-        except asyncio.TimeoutError:
-            # Forced refresh is not required for setup
-            pass
+
         if ATTR_POSITION_DATA not in shade.raw_data:
             _LOGGER.info(
                 "The %s shade was skipped because it is missing position data",
                 name_before_refresh,
             )
             continue
+        room_id = shade.raw_data.get(ROOM_ID_IN_SHADE)
+        room_name = room_data.get(room_id, {}).get(ROOM_NAME_UNICODE, "")
         entities.append(
             PowerViewShade(
-                shade, name_before_refresh, room_data, coordinator, device_info
+                coordinator, device_info, room_name, shade, name_before_refresh
             )
         )
     async_add_entities(entities)
@@ -90,29 +95,26 @@ def hd_position_to_hass(hd_position):
     return round((hd_position / MAX_POSITION) * 100)
 
 
-def hass_position_to_hd(hass_positon):
+def hass_position_to_hd(hass_position):
     """Convert hass position to hunter douglas position."""
-    return int(hass_positon / 100 * MAX_POSITION)
+    return int(hass_position / 100 * MAX_POSITION)
 
 
 class PowerViewShade(ShadeEntity, CoverEntity):
     """Representation of a powerview shade."""
 
-    def __init__(self, shade, name, room_data, coordinator, device_info):
+    def __init__(self, coordinator, device_info, room_name, shade, name):
         """Initialize the shade."""
-        room_id = shade.raw_data.get(ROOM_ID_IN_SHADE)
-        super().__init__(coordinator, device_info, shade, name)
+        super().__init__(coordinator, device_info, room_name, shade, name)
         self._shade = shade
-        self._device_info = device_info
         self._is_opening = False
         self._is_closing = False
         self._last_action_timestamp = 0
         self._scheduled_transition_update = None
-        self._room_name = room_data.get(room_id, {}).get(ROOM_NAME_UNICODE, "")
         self._current_cover_position = MIN_POSITION
 
     @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the state attributes."""
         return {STATE_ATTRIBUTE_ROOM_NAME: self._room_name}
 
@@ -147,7 +149,7 @@ class PowerViewShade(ShadeEntity, CoverEntity):
     @property
     def device_class(self):
         """Return device class."""
-        return DEVICE_CLASS_SHADE
+        return CoverDeviceClass.SHADE
 
     @property
     def name(self):
@@ -179,8 +181,6 @@ class PowerViewShade(ShadeEntity, CoverEntity):
         """Move the shade to a position."""
         current_hass_position = hd_position_to_hass(self._current_cover_position)
         steps_to_move = abs(current_hass_position - target_hass_position)
-        if not steps_to_move:
-            return
         self._async_schedule_update_for_transition(steps_to_move)
         self._async_update_from_command(
             await self._shade.move(
@@ -217,7 +217,7 @@ class PowerViewShade(ShadeEntity, CoverEntity):
         _LOGGER.debug("Raw data update: %s", self._shade.raw_data)
         position_data = self._shade.raw_data.get(ATTR_POSITION_DATA, {})
         if ATTR_POSITION1 in position_data:
-            self._current_cover_position = position_data[ATTR_POSITION1]
+            self._current_cover_position = int(position_data[ATTR_POSITION1])
         self._is_opening = False
         self._is_closing = False
 

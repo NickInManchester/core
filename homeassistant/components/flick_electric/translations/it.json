@@ -12,13 +12,12 @@
             "user": {
                 "data": {
                     "client_id": "ID cliente (opzionale)",
-                    "client_secret": "Client Secret (opzionale)",
+                    "client_secret": "Segreto client (opzionale)",
                     "password": "Password",
                     "username": "Nome utente"
                 },
                 "title": "Credenziali di accesso Flick"
             }
         }
-    },
-    "title": "Flick Electric"
+    }
 }

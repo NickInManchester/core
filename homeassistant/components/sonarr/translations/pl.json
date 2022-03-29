@@ -9,11 +9,11 @@
             "cannot_connect": "Nie mo\u017cna nawi\u0105za\u0107 po\u0142\u0105czenia",
             "invalid_auth": "Niepoprawne uwierzytelnienie"
         },
-        "flow_title": "Sonarr: {name}",
+        "flow_title": "{name}",
         "step": {
             "reauth_confirm": {
-                "description": "Integracja Sonarr musi by\u0107 r\u0119cznie ponownie uwierzytelniona za pomoc\u0105 API Sonarr pod adresem: {host}",
-                "title": "Ponownie uwierzytelnij w Sonarr"
+                "description": "Integracja Sonarr musi by\u0107 r\u0119cznie ponownie uwierzytelniona za pomoc\u0105 API Sonarr pod adresem: {url}",
+                "title": "Ponownie uwierzytelnij integracj\u0119"
             },
             "user": {
                 "data": {
@@ -22,9 +22,9 @@
                     "host": "Nazwa hosta lub adres IP",
                     "port": "Port",
                     "ssl": "Certyfikat SSL",
+                    "url": "URL",
                     "verify_ssl": "Weryfikacja certyfikatu SSL"
-                },
-                "title": "Po\u0142\u0105cz z Sonarr"
+                }
             }
         }
     },
@@ -37,6 +37,5 @@
                 }
             }
         }
-    },
-    "title": "Sonarr"
+    }
 }

@@ -1,7 +1,12 @@
 """The tests for the TTS component."""
+from http import HTTPStatus
+from unittest.mock import PropertyMock, patch
+
 import pytest
+import voluptuous as vol
 import yarl
 
+from homeassistant.components import tts
 from homeassistant.components.demo.tts import DemoProvider
 from homeassistant.components.media_player.const import (
     ATTR_MEDIA_CONTENT_ID,
@@ -10,14 +15,13 @@ from homeassistant.components.media_player.const import (
     MEDIA_TYPE_MUSIC,
     SERVICE_PLAY_MEDIA,
 )
-import homeassistant.components.tts as tts
-from homeassistant.components.tts import _get_cache_files
 from homeassistant.config import async_process_ha_core_config
-from homeassistant.const import HTTP_NOT_FOUND
 from homeassistant.setup import async_setup_component
+from homeassistant.util.network import normalize_url
 
-from tests.async_mock import PropertyMock, patch
 from tests.common import assert_setup_component, async_mock_service
+
+ORIG_WRITE_TAGS = tts.SpeechManager.write_tags
 
 
 def relative_url(url):
@@ -29,58 +33,6 @@ def relative_url(url):
 def demo_provider():
     """Demo TTS provider."""
     return DemoProvider("en")
-
-
-@pytest.fixture(autouse=True)
-def mock_get_cache_files():
-    """Mock the list TTS cache function."""
-    with patch(
-        "homeassistant.components.tts._get_cache_files", return_value={}
-    ) as mock_cache_files:
-        yield mock_cache_files
-
-
-@pytest.fixture(autouse=True)
-def mock_init_cache_dir():
-    """Mock the TTS cache dir in memory."""
-    with patch(
-        "homeassistant.components.tts._init_tts_cache_dir",
-        side_effect=lambda hass, cache_dir: hass.config.path(cache_dir),
-    ) as mock_cache_dir:
-        yield mock_cache_dir
-
-
-@pytest.fixture
-def empty_cache_dir(tmp_path, mock_init_cache_dir, mock_get_cache_files, request):
-    """Mock the TTS cache dir with empty dir."""
-    mock_init_cache_dir.side_effect = None
-    mock_init_cache_dir.return_value = str(tmp_path)
-
-    # Restore original get cache files behavior, we're working with a real dir.
-    mock_get_cache_files.side_effect = _get_cache_files
-
-    yield tmp_path
-
-    if request.node.rep_call.passed:
-        return
-
-    # Print contents of dir if failed
-    print("Content of dir for", request.node.nodeid)
-    for fil in tmp_path.iterdir():
-        print(fil.relative_to(tmp_path))
-
-    # To show the log.
-    assert False
-
-
-@pytest.fixture(autouse=True)
-def mutagen_mock():
-    """Mock writing tags."""
-    with patch(
-        "homeassistant.components.tts.SpeechManager.write_tags",
-        side_effect=lambda *args: args[1],
-    ):
-        yield
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +53,7 @@ async def test_setup_component_demo(hass):
 
     assert hass.services.has_service(tts.DOMAIN, "demo_say")
     assert hass.services.has_service(tts.DOMAIN, "clear_cache")
+    assert f"{tts.DOMAIN}.demo" in hass.config.components
 
 
 async def test_setup_component_demo_no_access_cache_folder(hass, mock_init_cache_dir):
@@ -480,11 +433,11 @@ async def test_setup_component_and_test_service_with_receive_voice(
         "42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3",
         demo_data,
         demo_provider,
-        "AI person is in front of your door.",
+        "There is someone at the door.",
         "en",
         None,
     )
-    assert req.status == 200
+    assert req.status == HTTPStatus.OK
     assert await req.read() == demo_data
 
 
@@ -521,7 +474,7 @@ async def test_setup_component_and_test_service_with_receive_voice_german(
         "de",
         None,
     )
-    assert req.status == 200
+    assert req.status == HTTPStatus.OK
     assert await req.read() == demo_data
 
 
@@ -537,7 +490,7 @@ async def test_setup_component_and_web_view_wrong_file(hass, hass_client):
     url = "/api/tts_proxy/42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3"
 
     req = await client.get(url)
-    assert req.status == HTTP_NOT_FOUND
+    assert req.status == HTTPStatus.NOT_FOUND
 
 
 async def test_setup_component_and_web_view_wrong_filename(hass, hass_client):
@@ -552,7 +505,7 @@ async def test_setup_component_and_web_view_wrong_filename(hass, hass_client):
     url = "/api/tts_proxy/265944dsk32c1b2a621be5930510bb2cd_en_-_demo.mp3"
 
     req = await client.get(url)
-    assert req.status == HTTP_NOT_FOUND
+    assert req.status == HTTPStatus.NOT_FOUND
 
 
 async def test_setup_component_test_without_cache(hass, empty_cache_dir):
@@ -680,7 +633,7 @@ async def test_setup_component_load_cache_retrieve_without_mem_cache(
     url = "/api/tts_proxy/42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3"
 
     req = await client.get(url)
-    assert req.status == 200
+    assert req.status == HTTPStatus.OK
     assert await req.read() == demo_data
 
 
@@ -696,11 +649,12 @@ async def test_setup_component_and_web_get_url(hass, hass_client):
     data = {"platform": "demo", "message": "There is someone at the door."}
 
     req = await client.post(url, json=data)
-    assert req.status == 200
+    assert req.status == HTTPStatus.OK
     response = await req.json()
-    assert response.get("url") == (
-        "http://example.local:8123/api/tts_proxy/42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3"
-    )
+    assert response == {
+        "url": "http://example.local:8123/api/tts_proxy/42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3",
+        "path": "/api/tts_proxy/42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.mp3",
+    }
 
 
 async def test_setup_component_and_web_get_url_bad_config(hass, hass_client):
@@ -715,4 +669,63 @@ async def test_setup_component_and_web_get_url_bad_config(hass, hass_client):
     data = {"message": "There is someone at the door."}
 
     req = await client.post(url, json=data)
-    assert req.status == 400
+    assert req.status == HTTPStatus.BAD_REQUEST
+
+
+async def test_tags_with_wave(hass, demo_provider):
+    """Set up the demo platform and call service and receive voice."""
+
+    # below data represents an empty wav file
+    demo_data = bytes.fromhex(
+        "52 49 46 46 24 00 00 00 57 41 56 45 66 6d 74 20 10 00 00 00 01 00 02 00"
+        + "22 56 00 00 88 58 01 00 04 00 10 00 64 61 74 61 00 00 00 00"
+    )
+
+    tagged_data = ORIG_WRITE_TAGS(
+        "42f18378fd4393d18c8dd11d03fa9563c1e54491_en_-_demo.wav",
+        demo_data,
+        demo_provider,
+        "AI person is in front of your door.",
+        "en",
+        None,
+    )
+
+    assert tagged_data != demo_data
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "http://example.local:8123",
+        "http://example.local",
+        "http://example.local:80",
+        "https://example.com",
+        "https://example.com:443",
+        "https://example.com:8123",
+    ),
+)
+def test_valid_base_url(value):
+    """Test we validate base urls."""
+    assert tts.valid_base_url(value) == normalize_url(value)
+    # Test we strip trailing `/`
+    assert tts.valid_base_url(value + "/") == normalize_url(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "http://example.local:8123/sub-path",
+        "http://example.local/sub-path",
+        "https://example.com/sub-path",
+        "https://example.com:8123/sub-path",
+        "mailto:some@email",
+        "http:example.com",
+        "http:/example.com",
+        "http//example.com",
+        "example.com",
+    ),
+)
+def test_invalid_base_url(value):
+    """Test we catch bad base urls."""
+    with pytest.raises(vol.Invalid):
+        tts.valid_base_url(value)

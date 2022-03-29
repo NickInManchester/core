@@ -5,10 +5,9 @@
             "unknown": "Errore imprevisto"
         },
         "error": {
-            "cannot_connect": "Impossibile connettersi",
-            "invalid_auth": "Autenticazione non valida"
+            "cannot_connect": "Impossibile connettersi"
         },
-        "flow_title": "NZBGet: {name}",
+        "flow_title": "{name}",
         "step": {
             "user": {
                 "data": {
@@ -18,7 +17,7 @@
                     "port": "Porta",
                     "ssl": "Utilizza un certificato SSL",
                     "username": "Nome utente",
-                    "verify_ssl": "Verificare il certificato SSL"
+                    "verify_ssl": "Verifica il certificato SSL"
                 },
                 "title": "Connettiti a NZBGet"
             }

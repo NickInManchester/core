@@ -9,11 +9,11 @@
             "cannot_connect": "Ha fallat la connexi\u00f3",
             "invalid_auth": "Autenticaci\u00f3 inv\u00e0lida"
         },
-        "flow_title": "Sonarr: {name}",
+        "flow_title": "{name}",
         "step": {
             "reauth_confirm": {
-                "description": "La integraci\u00f3 de Sonarr ha de tornar a autenticar-se manualment amb l'API de Sonarr allotjada a: {host}",
-                "title": "Re-autenticaci\u00f3 amb Sonarr"
+                "description": "La integraci\u00f3 de Sonarr ha de tornar a autenticar-se manualment amb l'API de Sonarr allotjada a: {url}",
+                "title": "Reautenticaci\u00f3 de la integraci\u00f3"
             },
             "user": {
                 "data": {
@@ -22,9 +22,9 @@
                     "host": "Amfitri\u00f3",
                     "port": "Port",
                     "ssl": "Utilitza un certificat SSL",
+                    "url": "URL",
                     "verify_ssl": "Verifica el certificat SSL"
-                },
-                "title": "Connexi\u00f3 amb Sonarr"
+                }
             }
         }
     },
@@ -37,6 +37,5 @@
                 }
             }
         }
-    },
-    "title": "Sonarr"
+    }
 }
